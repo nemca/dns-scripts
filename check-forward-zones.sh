@@ -15,8 +15,8 @@
 # limitations under the License.
 
 progname=$(basename $0)
-shortopts="a:c:hk:tu:"
-longopts="api-url:,cacert:,cert:,help,key:,tls"
+shortopts="a:c:e:hk:tu:"
+longopts="api-url:,cacert:,cert:,exclude:,help,key:,tls"
 
 # Default options
 interval="${COLLECTD_INTERVAL:-30}"
@@ -25,6 +25,7 @@ use_tls="false"
 cacert=
 cert=
 key=
+exclude=
 curl_opts="-s -X GET"
 api_url="https://10.0.0.1"
 
@@ -40,6 +41,7 @@ EO
   cat <<-EO | column -s\& -t
   -a --cacert & Path to TLS Certificate Authority certificate.
   -c --cert & Path to TLS certificate.
+  -e --exclude & Domains that exclude from checks.
   -h --help & Print this message.
   -k --key & Path to TLS key.
   -t --tls & Use TLS for connection to API.
@@ -58,6 +60,8 @@ while true; do
       cacert="$2"; shift;;
     -c|--cert)
       cert="$2"; shift;;
+    -e|--exclude)
+      exclude="$2"; shift;;
     -k|--key)
       key="$2"; shift;;
     -t|--tls)
@@ -123,24 +127,24 @@ check_soa() {
   # UDP
   dig +short +time=2 @${ip} -p ${port} SOA ${fz} &>/dev/null
   if [[ $? -ne 0 ]]; then
-    print_result "${fz}" 1
+    print_result "${fz}_${ip}" 1
     return
   fi
   # TCP
   dig +tcp +short +time=2 @${ip} -p ${port} SOA ${fz} &>/dev/null
   if [[ $? -ne 0 ]]; then
-    print_result "${fz}" 2
+    print_result "${fz}_${ip}" 2
     return
   fi
   # OK
-  print_result "${fz}" 0
+  print_result "${fz}_${ip}" 0
 }
 
 # print_result prints result in collectd exec format
 print_result() {
   local fz="$1"
   local ret="$2"
-  echo "PUTVAL \"${hostname}/exec/gauge-${fz}\" interval=${interval} N:${ret}"
+  echo "PUTVAL \"${hostname}/exec/gauge-fz-${fz}\" interval=${interval} N:${ret}"
 }
 
 # trap signal for graceful exit
@@ -151,6 +155,10 @@ fzs_file=$(mktemp)
 curl ${curl_opts} ${api_url}/api/v1/servers/localhost/forward-zones > ${fzs_file}
 # Iterate over forward-zones list
 for fz in $(jq -r '.[] | .name' "${fzs_file}"); do
+  # Exclude domains from check (see -e|--exclude option)
+  if fgrep -wq "${fz}" <<< "${exclude}"; then
+    continue
+  fi
   # Get zone nameservers and parse to ip and port
   namservers=$(jq -r ".[] | select(.name==\"${fz}\") | .nameservers | @tsv" "${fzs_file}")
   for ns in ${namservers}; do
