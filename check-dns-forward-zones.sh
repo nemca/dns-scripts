@@ -15,19 +15,24 @@
 # limitations under the License.
 
 progname=$(basename $0)
-shortopts="a:c:e:hk:tu:"
-longopts="api-url:,cacert:,cert:,exclude:,help,key:,tls"
+shortopts="a:c:e:E:hk:Tt:u:U:"
+longopts="api-url:,cacert:,cert:,exclude:,exclude-tcp:,exclude-udp:,help,key:,timeout:,tls"
 
 # Default options
 interval="${COLLECTD_INTERVAL:-30}"
 hostname="${COLLECTD_HOSTNAME:-$(hostname)}"
+graphite_host="graphite"
+graphite_port="2003"
 use_tls="false"
 cacert=
 cert=
 key=
 exclude=
+exclude_tcp=
+exclude_udp=
 curl_opts="-s -X GET"
 api_url="https://10.0.0.1"
+check_timeout="2"
 
 usage() {
   cat <<-EO
@@ -42,10 +47,13 @@ EO
   -a --cacert & Path to TLS Certificate Authority certificate.
   -c --cert & Path to TLS certificate.
   -e --exclude & Domains that exclude from checks.
+  -E --exclude-tcp & Domains that exclude from TCP checks.
   -h --help & Print this message.
   -k --key & Path to TLS key.
-  -t --tls & Use TLS for connection to API.
-  -u --api-url & The API server URL.
+  -T --tls & Use TLS for connection to API.
+  -t --timeout & Timeout in seconds to DNS check. (Default: ${check_timeout})
+  -u --api-url & The API server URL. (Default: ${api_url})
+  -U --exclude-udp & Domains that exclude from UDP checks.
 EO
 }
 
@@ -62,12 +70,18 @@ while true; do
       cert="$2"; shift;;
     -e|--exclude)
       exclude="$2"; shift;;
+    -E|--exclude-tcp)
+      exclude_tcp="$2"; shift;;
     -k|--key)
       key="$2"; shift;;
-    -t|--tls)
+    -T|--tls)
       use_tls="true";;
+    -t|--timeout)
+      check_timeout="$2"; shift;;
     -u|--api-url)
       api_url="$2"; shift;;
+    -U|--exclude-udp)
+      exclude_udp="$2"; shift;;
     --)
       shift; break;;
     *)
@@ -125,26 +139,32 @@ check_soa() {
   local ip="$2"
   local port="$3"
   # UDP
-  dig +short +time=2 @${ip} -p ${port} SOA ${fz} &>/dev/null
-  if [[ $? -ne 0 ]]; then
-    print_result "${fz}_${ip}" 1
-    return
+  if ! fgrep -wq "${fz}" <<< "${exclude_udp}"; then
+    dig +short +time=${check_timeout} @${ip} -p ${port} SOA ${fz} &>/dev/null
+    if [[ $? -ne 0 ]]; then
+      print_result "${fz}" "${ip}" 1
+      return
+    fi
   fi
   # TCP
-  dig +tcp +short +time=2 @${ip} -p ${port} SOA ${fz} &>/dev/null
-  if [[ $? -ne 0 ]]; then
-    print_result "${fz}_${ip}" 2
-    return
+  if ! fgrep -wq "${fz}" <<< "${exclude_tcp}"; then
+    dig +tcp +short +time=${check_timeout} @${ip} -p ${port} SOA ${fz} &>/dev/null
+    if [[ $? -ne 0 ]]; then
+      print_result "${fz}" "${ip}" 2
+      return
+    fi
   fi
   # OK
-  print_result "${fz}_${ip}" 0
+  print_result "${fz}" "${ip}" 0
 }
 
 # print_result prints result in collectd exec format
 print_result() {
   local fz="$1"
-  local ret="$2"
-  echo "PUTVAL \"${hostname}/exec/gauge-fz-${fz}\" interval=${interval} N:${ret}"
+  local ns_ip="$2"
+  local metric="$3"
+  # Send to Graphite
+  nc -w 10 "${graphite_host}" "${graphite_port}" <<< "resources.dns_forward_zones_checker;hostname=${hostname};fz=${fz};ns=${ns_ip} ${metric} $(date +%s)"
 }
 
 # trap signal for graceful exit
